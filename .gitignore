@@ -1,0 +1,8 @@
+# Runtime quota snapshot (contains your account email)
+quota_cache.json
+
+# Background refresh lock
+quota_refresh.lock
+
+# settings.json backup created by install.ps1
+settings.json.bak

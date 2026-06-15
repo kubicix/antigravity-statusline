@@ -134,11 +134,14 @@ if ($null -eq $quotaData -or $null -ne $quotaData.error) {
         @{ label = "Gemini";     data = $quotaData.gemini },
         @{ label = "Claude/GPT"; data = $quotaData.claude_gpt }
     )
+    # Last-good data kept after a failed refresh is flagged stale; show a marker
+    # instead of blanking the bars to a loading state.
+    $staleSuffix = if ($quotaData.stale) { " ${DIM}${GRAY}(stale)${RESET}" } else { "" }
     foreach ($row in $rows) {
         $pct = [double]($row.data.remaining_pct)
         $refresh = [string]($row.data.refresh_in)
         $info = if ($pct -ge 99.9) { "Full" } else { "Resets in $refresh" }
-        $lines += Format-ProgressBar -Label $row.label -Pct $pct -RefreshInfo $info
+        $lines += (Format-ProgressBar -Label $row.label -Pct $pct -RefreshInfo $info) + $staleSuffix
     }
 }
 

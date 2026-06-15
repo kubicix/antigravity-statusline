@@ -48,13 +48,16 @@ reflects the **most-constrained** one (lowest remaining).
 
 ## How it works
 
-Antigravity runs a local `language_server` process that exposes a Connect-RPC endpoint.
-The statusline reads quota from it in two pieces:
+While a session is open, `agy` runs an embedded language server (inside `agy.exe`)
+that exposes a Connect-RPC endpoint on a random local port. The statusline reads quota
+from it in two pieces:
 
 1. **`quota_refresh.ps1`** (background fetcher)
-   - Finds the `language_server` process, reads its `--csrf_token` and listening ports.
-   - Calls `POST /exa.language_server_pb.LanguageServerService/GetUserStatus` with the
-     `X-Codeium-Csrf-Token` header and `Connect-Protocol-Version: 1`.
+   - Finds the `agy.exe` process (or a standalone `language_server` when the Antigravity
+     IDE is running) and its listening ports.
+   - Calls `POST /exa.language_server_pb.LanguageServerService/GetUserStatus` with
+     `Connect-Protocol-Version: 1`. The embedded server accepts local requests without a
+     CSRF token; a discovered `--csrf_token` is sent as `X-Codeium-Csrf-Token` when present.
    - Parses each model's `remainingFraction` + `resetTime`, groups them into the two
      pools (Gemini, Claude/GPT), and writes `quota_cache.json`.
 

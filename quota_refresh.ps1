@@ -46,10 +46,38 @@ function Write-Cache {
     [System.IO.File]::WriteAllText($CACHE_FILE, $Json, $utf8NoBom)
 }
 
+# On failure, keep the last good quota values (marked stale) instead of blanking
+# the bars to a loading state. Falls back to an error-only cache if none exists.
+function Write-Failure {
+    param([string]$ErrMsg)
+    $prev = $null
+    if (Test-Path $CACHE_FILE) {
+        try { $prev = Get-Content $CACHE_FILE -Raw | ConvertFrom-Json } catch {}
+    }
+    if ($prev -and $null -ne $prev.gemini -and $null -ne $prev.claude_gpt) {
+        Write-Cache (@{
+            timestamp    = $prev.timestamp
+            error        = $null
+            stale        = $true
+            stale_reason = $ErrMsg
+            account      = "$($prev.account)"
+            plan         = "$($prev.plan)"
+            gemini       = @{ remaining_pct = $prev.gemini.remaining_pct;     refresh_in = "$($prev.gemini.refresh_in)" }
+            claude_gpt   = @{ remaining_pct = $prev.claude_gpt.remaining_pct; refresh_in = "$($prev.claude_gpt.refresh_in)" }
+        } | ConvertTo-Json -Depth 5)
+    } else {
+        Write-Cache (@{ timestamp = (Get-Date -Format "o"); error = $ErrMsg } | ConvertTo-Json -Depth 5)
+    }
+}
+
 try {
     # ─── Step 1: Discover language server processes (pid + csrf token + ports) ──
+    # agy 1.0.8 embeds the language server inside agy.exe itself (it listens on
+    # random local HTTP/HTTPS ports). Older setups expose a standalone
+    # language_server_windows_x64.exe (e.g. when the Antigravity IDE is running).
+    # Match both, plus anything carrying a --csrf_token on its command line.
     $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.Name -match "language_server|antigravity" -or $_.CommandLine -match "--csrf_token"
+        $_.Name -match "language_server|antigravity" -or $_.Name -eq "agy.exe" -or $_.CommandLine -match "--csrf_token"
     }
 
     # Each candidate pairs a token with the ports of the SAME process.
@@ -76,11 +104,24 @@ try {
         }
     }
 
+    # Self-healing fallback: if the process names ever change again, probe every
+    # local listening port. The GetUserStatus response itself validates the right
+    # one. Named-process candidates are tried first, so this only runs when they
+    # all fail. Capped and high-port-first (agy uses random high ports).
+    try {
+        $knownPorts = @($candidates | ForEach-Object { $_.Port })
+        $fallbackPorts = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -match "127\.0\.0\.1|::1|0\.0\.0\.0" } |
+            Select-Object -ExpandProperty LocalPort -Unique |
+            Where-Object { $knownPorts -notcontains $_ } |
+            Sort-Object -Descending | Select-Object -First 40
+        foreach ($p in $fallbackPorts) {
+            $candidates += [pscustomobject]@{ Port = [int]$p; Token = "" }
+        }
+    } catch {}
+
     if ($candidates.Count -eq 0) {
-        Write-Cache (@{
-            timestamp = (Get-Date -Format "o")
-            error = "No Antigravity language server process/port found"
-        } | ConvertTo-Json -Depth 5)
+        Write-Failure "No Antigravity language server process/port found"
         exit 1
     }
 
@@ -89,32 +130,35 @@ try {
     $lastError = "No candidate responded"
 
     foreach ($cand in $candidates) {
+        # Try the discovered token and also no token (agy.exe's embedded HTTP
+        # server accepts local requests without a CSRF token).
+        $tokensToTry = @($cand.Token, "") | Select-Object -Unique
         foreach ($scheme in @("http", "https")) {
-            $headers = @{
-                "Accept" = "application/json"
-                "Content-Type" = "application/json"
-                "Connect-Protocol-Version" = "1"
-            }
-            if ($cand.Token -ne "") { $headers["X-Codeium-Csrf-Token"] = $cand.Token }
+            foreach ($tok in $tokensToTry) {
+                $headers = @{
+                    "Accept" = "application/json"
+                    "Content-Type" = "application/json"
+                    "Connect-Protocol-Version" = "1"
+                }
+                if ($tok -ne "") { $headers["X-Codeium-Csrf-Token"] = $tok }
 
-            $url = "${scheme}://127.0.0.1:$($cand.Port)$USER_STATUS_PATH"
-            try {
-                $response = Invoke-RestMethod -Uri $url -Method POST -Headers $headers `
-                    -Body $REQUEST_BODY -TimeoutSec $TIMEOUT_SECONDS -ErrorAction Stop
-                if ($null -ne $response -and $null -ne $response.userStatus) { break }
-                $response = $null
-            } catch {
-                $lastError = $_.Exception.Message
+                $url = "${scheme}://127.0.0.1:$($cand.Port)$USER_STATUS_PATH"
+                try {
+                    $response = Invoke-RestMethod -Uri $url -Method POST -Headers $headers `
+                        -Body $REQUEST_BODY -TimeoutSec $TIMEOUT_SECONDS -ErrorAction Stop
+                    if ($null -ne $response -and $null -ne $response.userStatus) { break }
+                    $response = $null
+                } catch {
+                    $lastError = $_.Exception.Message
+                }
             }
+            if ($null -ne $response) { break }
         }
         if ($null -ne $response) { break }
     }
 
     if ($null -eq $response) {
-        Write-Cache (@{
-            timestamp = (Get-Date -Format "o")
-            error = "Could not query language server: $lastError"
-        } | ConvertTo-Json -Depth 5)
+        Write-Failure "Could not query language server: $lastError"
         exit 1
     }
 

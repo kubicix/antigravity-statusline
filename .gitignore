@@ -6,3 +6,4 @@ quota_refresh.lock
 
 # settings.json backup created by install.ps1
 settings.json.bak
+assets/

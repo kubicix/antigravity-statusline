@@ -1,8 +1,9 @@
 <h1 align="center">Antigravity CLI — Quota Statusline</h1>
 
 <p align="center">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-blue">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue">
   <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-5.1-5391FE">
+  <img alt="Bash" src="https://img.shields.io/badge/Bash-4.0+-4EAA25">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="Status" src="https://img.shields.io/badge/status-working-brightgreen">
 </p>
@@ -73,7 +74,8 @@ Ports and the CSRF token change every time `agy` restarts, so discovery is fully
 
 ## Requirements
 
-- Windows + PowerShell 5.1 (built in)
+- **Windows:** PowerShell 5.1 (built-in)
+- **macOS / Linux:** Bash 4.0+ & `lsof`
 - Antigravity CLI (`agy`) installed and signed in — verify with `agy --version`
 - An active `agy` session running (the language server must be up to serve quota)
 
@@ -81,10 +83,20 @@ Ports and the CSRF token change every time `agy` restarts, so discovery is fully
 
 ## Quick Install
 
+### Windows (PowerShell)
+
 Run this single command in PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/kubicix/agy-statusline/main/install-remote.ps1 | iex
+```
+
+### macOS / Linux (Bash)
+
+Run this single command in terminal:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/kubicix/agy-statusline/main/install-remote.sh | bash
 ```
 
 That's it. Open a new `agy` session and the quota bars appear automatically.
@@ -92,10 +104,19 @@ That's it. Open a new `agy` session and the quota bars appear automatically.
 <details>
 <summary><b>Manual Install (git clone)</b></summary>
 
+**Windows:**
 ```powershell
 git clone https://github.com/kubicix/agy-statusline.git
 cd agy-statusline
 powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+**macOS / Linux:**
+```bash
+git clone https://github.com/kubicix/agy-statusline.git
+cd agy-statusline
+chmod +x install.sh
+./install.sh
 ```
 
 </details>
@@ -103,8 +124,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ### What the installer does
 
 1. Backs up your existing `settings.json` → `settings.json.bak`
-2. Copies `statusline.ps1` and `quota_refresh.ps1` to `%USERPROFILE%\.gemini\antigravity-cli\`
-3. Sets `statusLine` in `settings.json` to run the renderer
+2. Copies the renderer and background scripts to `~/.gemini/antigravity-cli/`
+3. Sets `statusLine` in `settings.json` to run the renderer script
 4. Writes an initial cache so the first frame shows a loading state
 
 Then open a new session:
@@ -119,8 +140,9 @@ The bars appear below the input box and refresh automatically every 60 seconds.
 
 ## Configuration
 
-The installer adds this to `%USERPROFILE%\.gemini\antigravity-cli\settings.json`:
+The installer configures the `statusLine` section in your `~/.gemini/antigravity-cli/settings.json`.
 
+**Windows:**
 ```json
 {
   "statusLine": {
@@ -131,22 +153,39 @@ The installer adds this to `%USERPROFILE%\.gemini\antigravity-cli\settings.json`
 }
 ```
 
+**macOS / Linux:**
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/bin/bash /Users/<you>/.gemini/antigravity-cli/statusline.sh",
+    "enabled": true
+  }
+}
+```
+
 Tunable values at the top of the scripts:
 
 | Script | Variable | Default | Meaning |
 | --- | --- | --- | --- |
-| `statusline.ps1` | `$CACHE_MAX_AGE_SECONDS` | `60` | How old the cache may get before a background refresh fires |
-| `statusline.ps1` | `$BAR_WIDTH` | `16` | Progress bar width in characters |
-| `quota_refresh.ps1` | `$TIMEOUT_SECONDS` | `5` | Per-request HTTP timeout |
+| `statusline.ps1` / `.sh` | `CACHE_MAX_AGE_SECONDS` | `60` | How old the cache may get before a background refresh fires |
+| `statusline.ps1` / `.sh` | `BAR_WIDTH` | `16` | Progress bar width in characters |
+| `quota_refresh.ps1` / `.sh` | `TIMEOUT_SECONDS` | `5` | Per-request HTTP timeout |
 
-Color thresholds live in `Get-QuotaColor` inside `statusline.ps1`.
+Color thresholds live in `Get-QuotaColor` / `get_quota_color` inside the renderer scripts.
 
 ---
 
 ## Uninstall
 
+**Windows:**
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+```
+
+**macOS / Linux:**
+```bash
+./uninstall.sh
 ```
 
 This restores `settings.json` from the backup (or clears the `statusLine` entry if no
@@ -156,8 +195,7 @@ backup exists) and removes the installed scripts and cache. Restart `agy` to app
 
 ## Limitations
 
-- **Windows only.** The fetcher uses `Get-CimInstance` / `Get-NetTCPConnection` and
-  Windows PowerShell.
+- **Cross-platform.** Works natively on Windows (PowerShell) and macOS/Linux (Bash).
 - **No weekly vs. 5-hour split.** The `/usage` panel shows separate *weekly* and
   *5-hour* limits per group. The local `GetUserStatus` API does **not** expose that
   breakdown — it returns a single effective `remainingFraction` + `resetTime` per model.
@@ -165,7 +203,7 @@ backup exists) and removes the installed scripts and cache. Restart `agy` to app
   inside the interactive `/usage` panel.
 - Models in the same backend pool share quota, so e.g. Claude and GPT-OSS may move
   together.
-- Numbers use the system locale decimal separator (so `100,0%` on a Turkish system).
+- Numbers use the system locale decimal separator (so `100.0%` or `100,0%` depending on system locale).
 
 ---
 

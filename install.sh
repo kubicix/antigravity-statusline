@@ -12,18 +12,13 @@ BACKUP_FILE="${SETTINGS_FILE}.bak"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_STATUSLINE="${SCRIPT_DIR}/statusline.sh"
-SRC_REFRESH="${SCRIPT_DIR}/quota_refresh.sh"
 
 echo "=== Installing Antigravity CLI Quota Statusline ==="
 
 # 1. Verification
-if [ ! -f "$SRC_STATUSLINE" ] || [ ! -f "$SRC_REFRESH" ]; then
-    echo "Error: Source scripts not found in current directory (${SCRIPT_DIR})."
+if [ ! -f "$SRC_STATUSLINE" ]; then
+    echo "Error: Source script not found in current directory (${SCRIPT_DIR})."
     exit 1
-fi
-
-if ! command -v curl >/dev/null 2>&1; then
-    echo "Warning: cURL is not installed. Background refresh might fail."
 fi
 
 # 2. Create Target Directory
@@ -35,35 +30,12 @@ if [ -f "$SETTINGS_FILE" ]; then
     cp "$SETTINGS_FILE" "$BACKUP_FILE"
 fi
 
-# 4. Copy Scripts & Set Permissions
-echo "Copying scripts to ${INSTALL_DIR}..."
+# 4. Copy Script & Set Permissions
+echo "Copying script to ${INSTALL_DIR}..."
 cp "$SRC_STATUSLINE" "${INSTALL_DIR}/statusline.sh"
-cp "$SRC_REFRESH" "${INSTALL_DIR}/quota_refresh.sh"
 chmod +x "${INSTALL_DIR}/statusline.sh"
-chmod +x "${INSTALL_DIR}/quota_refresh.sh"
 
-# 5. Write Initial Cache
-echo "Seeding initial quota cache..."
-now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-cat <<EOF > "${INSTALL_DIR}/quota_cache.json"
-{
-  "timestamp": "$now",
-  "error": null,
-  "stale": false,
-  "account": "unknown",
-  "plan": "unknown",
-  "gemini": {
-    "remaining_pct": 100.0,
-    "refresh_in": "Full"
-  },
-  "claude_gpt": {
-    "remaining_pct": 100.0,
-    "refresh_in": "Full"
-  }
-}
-EOF
-
-# 6. Update settings.json
+# 5. Update settings.json
 echo "Configuring settings.json..."
 TARGET_CMD="/bin/bash ${INSTALL_DIR}/statusline.sh"
 

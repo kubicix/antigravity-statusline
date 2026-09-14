@@ -1,10 +1,14 @@
 <#
 .SYNOPSIS
-    Antigravity CLI Custom Statusline — Quota Usage Bars
+    Antigravity CLI Custom Statusline — Quota, Branch & Context Bars
 .DESCRIPTION
-    Renders compact ANSI progress bars showing model quota usage.
+    Renders compact ANSI progress bars for model quota usage, plus a
+    git branch indicator and a context-window usage bar.
     Called by agy CLI on every state change (JSON piped to stdin).
-    Reads cached quota data from quota_cache.json.
+    All data comes straight from that stdin payload — agy already reports
+    per-model quota in the "quota" field, so no background polling of the
+    local language server (port scanning / CSRF tokens / HTTP probing) is
+    needed or done here.
 .AUTHOR
     Kubilay Birer (kubicix) — MIT License
 #>
@@ -14,10 +18,6 @@
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-$SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-$CACHE_FILE = Join-Path $SCRIPT_DIR "quota_cache.json"
-$REFRESH_SCRIPT = Join-Path $SCRIPT_DIR "quota_refresh.ps1"
-$CACHE_MAX_AGE_SECONDS = 60
 $BAR_WIDTH = 16
 
 # ─── ANSI Escape Codes ──────────────────────────────────────────────────────
@@ -31,7 +31,6 @@ $RED     = "${ESC}[31m"
 $CYAN    = "${ESC}[36m"
 $GRAY    = "${ESC}[90m"
 $WHITE   = "${ESC}[37m"
-$BG_GRAY = "${ESC}[48;5;236m"
 
 # ─── Read stdin (agy pipes JSON session state) ──────────────────────────────
 try {
@@ -40,7 +39,12 @@ try {
     $stdinData = ""
 }
 
-# ─── Helper: Color by remaining percentage ──────────────────────────────────
+$payload = $null
+if ($stdinData -and $stdinData.Trim() -ne "") {
+    try { $payload = $stdinData | ConvertFrom-Json } catch { $payload = $null }
+}
+
+# ─── Helper: Color by remaining percentage (green = healthy, red = low) ─────
 function Get-QuotaColor {
     param([double]$Pct)
     if ($Pct -ge 70) { return $GREEN }   # 70-100 green
@@ -56,92 +60,101 @@ function Format-ProgressBar {
         [string]$RefreshInfo,
         [string]$Icon = [char]0x25C6  # ◆
     )
-    
+
     $color = Get-QuotaColor -Pct $Pct
     $filledCount = [math]::Floor(($Pct / 100.0) * $BAR_WIDTH)
     $emptyCount  = $BAR_WIDTH - $filledCount
-    
-    # Build bar characters
+
     $filledChar = [char]0x2588  # █
     $emptyChar  = [char]0x2591  # ░
-    
+
     $filledStr = ([string]$filledChar) * $filledCount
     $emptyStr  = ([string]$emptyChar) * $emptyCount
-    
-    # Format percentage with consistent width (invariant culture -> dot decimal)
+
     $pctStr = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0,6:F1}%", $Pct)
-    
-    # Pad label to consistent width
     $paddedLabel = $Label.PadRight(16)
-    
-    # Compose the line
-    $line = "${DIM}${color}${Icon}${RESET} ${WHITE}${paddedLabel}${RESET} ${GRAY}[${RESET}${color}${filledStr}${GRAY}${emptyStr}${RESET}${GRAY}]${RESET} ${BOLD}${color}${pctStr}${RESET}  ${DIM}${CYAN}${RefreshInfo}${RESET}"
-    
-    return $line
+
+    return "${DIM}${color}${Icon}${RESET} ${WHITE}${paddedLabel}${RESET} ${GRAY}[${RESET}${color}${filledStr}${GRAY}${emptyStr}${RESET}${GRAY}]${RESET} ${BOLD}${color}${pctStr}${RESET}  ${DIM}${CYAN}${RefreshInfo}${RESET}"
 }
 
-# ─── Helper: Trigger background refresh if cache is stale ────────────────────
-function Start-QuotaRefreshIfNeeded {
-    $needsRefresh = $false
-    
-    if (-not (Test-Path $CACHE_FILE)) {
-        $needsRefresh = $true
-    } else {
-        $cacheAge = (Get-Date) - (Get-Item $CACHE_FILE).LastWriteTime
-        if ($cacheAge.TotalSeconds -gt $CACHE_MAX_AGE_SECONDS) {
-            $needsRefresh = $true
+# ─── Helper: Format seconds-until-reset as "Xh Ym" / "Ym" / "now" ───────────
+function Format-ResetIn {
+    param([Nullable[int]]$Seconds)
+    if ($null -eq $Seconds -or $Seconds -le 0) { return "now" }
+    $hours = [math]::Floor($Seconds / 3600)
+    $mins  = [math]::Floor(($Seconds % 3600) / 60)
+    if ($hours -gt 0) { return "${hours}h ${mins}m" }
+    return "${mins}m"
+}
+
+# ─── Helper: Group the "quota" payload into Gemini / Claude+GPT buckets ─────
+# agy reports one bucket per model/window (e.g. "gemini-weekly"). Match by
+# family in the key name and keep the most-constrained (lowest remaining)
+# bucket per family — this mirrors the grouping the official /usage panel
+# shows.
+function Get-QuotaBuckets {
+    param($Quota)
+
+    $buckets = @{
+        gemini     = @{ pct = $null; reset = "N/A" }
+        claude_gpt = @{ pct = $null; reset = "N/A" }
+    }
+    if ($null -eq $Quota) { return $buckets }
+
+    foreach ($prop in $Quota.PSObject.Properties) {
+        $key = $prop.Name
+        $group = $null
+        if     ($key -match "(?i)gemini")     { $group = "gemini" }
+        elseif ($key -match "(?i)claude|gpt") { $group = "claude_gpt" }
+        if ($null -eq $group) { continue }
+
+        $entry = $prop.Value
+        $frac = 0.0
+        if ($null -ne $entry.remaining_fraction) { $frac = [double]$entry.remaining_fraction }
+        $pct = [math]::Round([math]::Max(0.0, [math]::Min(1.0, $frac)) * 100.0, 2)
+
+        if ($null -eq $buckets[$group].pct -or $pct -lt $buckets[$group].pct) {
+            $buckets[$group].pct = $pct
+            $buckets[$group].reset = Format-ResetIn -Seconds ($entry.reset_in_seconds -as [int])
         }
     }
-    
-    if ($needsRefresh -and (Test-Path $REFRESH_SCRIPT)) {
-        # Launch refresh in background — don't block the TUI
-        Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", $REFRESH_SCRIPT `
-            -WindowStyle Hidden -PassThru | Out-Null
+
+    foreach ($g in @("gemini", "claude_gpt")) {
+        if ($null -eq $buckets[$g].pct) { $buckets[$g].pct = 0.0 }
     }
+    return $buckets
 }
 
-# ─── Main: Read cache and render ────────────────────────────────────────────
-
-# Trigger refresh if needed
-Start-QuotaRefreshIfNeeded
-
-# Read cached quota data
-$quotaData = $null
-if (Test-Path $CACHE_FILE) {
-    try {
-        $raw = Get-Content -Path $CACHE_FILE -Raw -ErrorAction Stop
-        $quotaData = $raw | ConvertFrom-Json
-    } catch {
-        $quotaData = $null
-    }
-}
-
-# ─── Render Output ──────────────────────────────────────────────────────────
-
-$separator = "${GRAY}$([string]([char]0x2500) * 52)${RESET}"
+# ─── Main: render from the stdin payload ────────────────────────────────────
 $lines = @()
 
-if ($null -eq $quotaData -or $null -ne $quotaData.error) {
-    # No data yet or error — show loading state
+if ($null -eq $payload -or $null -eq $payload.quota) {
     $loadingIcon = [char]0x25CB  # ○
-    $lines += "${DIM}${GRAY}${loadingIcon} Quota data loading... (run /usage to check manually)${RESET}"
+    $lines += "${DIM}${GRAY}${loadingIcon} No quota data in payload yet (run /usage to check manually)${RESET}"
 } else {
-    # The local GetUserStatus API exposes one effective remaining % + reset per
-    # model (it does NOT split weekly vs 5-hour like the /usage TUI does). The two
-    # bars match the official /usage groups: Gemini, and Claude/GPT.
+    # Branch line
+    if ($payload.vcs -and $payload.vcs.branch) {
+        $dirtyMark = if ($payload.vcs.dirty) { " ${YELLOW}*${RESET}" } else { "" }
+        $lines += "${DIM}${GRAY}on${RESET} ${CYAN}$($payload.vcs.branch)${RESET}${dirtyMark}"
+    }
+
+    # Quota bars
+    $buckets = Get-QuotaBuckets -Quota $payload.quota
     $rows = @(
-        @{ label = "Gemini";     data = $quotaData.gemini },
-        @{ label = "Claude/GPT"; data = $quotaData.claude_gpt }
+        @{ label = "Gemini";     data = $buckets["gemini"] },
+        @{ label = "Claude/GPT"; data = $buckets["claude_gpt"] }
     )
-    # Last-good data kept after a failed refresh is flagged stale; show a marker
-    # instead of blanking the bars to a loading state.
-    $staleSuffix = if ($quotaData.stale) { " ${DIM}${GRAY}(stale)${RESET}" } else { "" }
     foreach ($row in $rows) {
-        $pct = [double]($row.data.remaining_pct)
-        $refresh = [string]($row.data.refresh_in)
-        $info = if ($pct -ge 99.9) { "Full" } else { "Resets in $refresh" }
-        $lines += (Format-ProgressBar -Label $row.label -Pct $pct -RefreshInfo $info) + $staleSuffix
+        $pct = [double]$row.data.pct
+        $info = if ($pct -ge 99.9) { "Full" } else { "Resets in $($row.data.reset)" }
+        $lines += Format-ProgressBar -Label $row.label -Pct $pct -RefreshInfo $info
+    }
+
+    # Context window usage bar
+    if ($payload.context_window -and $null -ne $payload.context_window.remaining_percentage) {
+        $remainingPct = [double]$payload.context_window.remaining_percentage
+        $usedPct = [math]::Round(100.0 - $remainingPct, 1)
+        $lines += Format-ProgressBar -Label "Context" -Pct $remainingPct -RefreshInfo "${usedPct}% used" -Icon ([char]0x25A0)
     }
 }
 

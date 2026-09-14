@@ -33,7 +33,7 @@ if (-not (Test-Path $TARGET_DIR)) {
 }
 
 # Verify source files exist
-$requiredFiles = @('statusline.ps1', 'quota_refresh.ps1')
+$requiredFiles = @('statusline.ps1')
 foreach ($file in $requiredFiles) {
     $srcPath = Join-Path $SOURCE_DIR $file
     if (-not (Test-Path $srcPath)) {
@@ -44,15 +44,15 @@ foreach ($file in $requiredFiles) {
 
 # Step 1: Backup settings.json
 if (Test-Path $SETTINGS_FILE) {
-    Write-Host '  [1/4] Backing up settings.json...' -ForegroundColor White
+    Write-Host '  [1/3] Backing up settings.json...' -ForegroundColor White
     Copy-Item -Path $SETTINGS_FILE -Destination $BACKUP_FILE -Force
     Write-Host '        Backup saved to: settings.json.bak' -ForegroundColor Gray
 } else {
-    Write-Host '  [1/4] No existing settings.json - will create new one' -ForegroundColor Yellow
+    Write-Host '  [1/3] No existing settings.json - will create new one' -ForegroundColor Yellow
 }
 
 # Step 2: Copy scripts
-Write-Host '  [2/4] Copying scripts to antigravity-cli directory...' -ForegroundColor White
+Write-Host '  [2/3] Copying scripts to antigravity-cli directory...' -ForegroundColor White
 foreach ($file in $requiredFiles) {
     $srcPath = Join-Path $SOURCE_DIR $file
     $dstPath = Join-Path $TARGET_DIR $file
@@ -61,7 +61,7 @@ foreach ($file in $requiredFiles) {
 }
 
 # Step 3: Update settings.json
-Write-Host '  [3/4] Updating settings.json...' -ForegroundColor White
+Write-Host '  [3/3] Updating settings.json...' -ForegroundColor White
 
 # Build the command path with forward slashes (agy is Go binary, prefers forward slashes)
 $scriptPath = (Join-Path $TARGET_DIR 'statusline.ps1').Replace('\', '/')
@@ -103,20 +103,6 @@ if (Test-Path $SETTINGS_FILE) {
 Write-Host '        statusLine.type = "command"' -ForegroundColor Gray
 Write-Host '        statusLine.enabled = true' -ForegroundColor Gray
 
-# Step 4: Create initial empty cache
-Write-Host '  [4/4] Creating initial quota cache...' -ForegroundColor White
-
-# Error set so the statusline shows a loading line until the first real refresh.
-$initialCache = @{
-    timestamp = (Get-Date -Format 'o')
-    error = 'Initializing - waiting for first quota refresh'
-} | ConvertTo-Json -Depth 5
-
-$cacheFile = Join-Path $TARGET_DIR 'quota_cache.json'
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($cacheFile, $initialCache, $utf8NoBom)
-Write-Host '        Cache initialized' -ForegroundColor Gray
-
 # Done
 Write-Host ''
 Write-Host '  [OK] Installation complete!' -ForegroundColor Green
@@ -124,7 +110,7 @@ Write-Host ''
 Write-Host '  Next steps:' -ForegroundColor White
 Write-Host '    1. Open a new agy session:  agy' -ForegroundColor Gray
 Write-Host '    2. The quota bars will appear below the input box' -ForegroundColor Gray
-Write-Host '    3. Data refreshes automatically every 60 seconds' -ForegroundColor Gray
+Write-Host '    3. Data updates on every agent state change (no polling)' -ForegroundColor Gray
 Write-Host ''
 Write-Host '  To uninstall, run:  .\uninstall.ps1' -ForegroundColor Yellow
 Write-Host ''

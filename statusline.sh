@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Antigravity CLI Custom Statusline — Quota Usage Bars (macOS/Linux)
-# Renders compact ANSI progress bars showing model quota usage.
-# Called by agy CLI on every state change.
+# Antigravity CLI Custom Statusline — Quota, Branch & Context Bars (macOS/Linux)
+# Renders compact ANSI progress bars for model quota usage, plus a git branch
+# indicator and a context-window usage bar. Called by agy CLI on every state
+# change (JSON piped to stdin).
+#
+# All data comes straight from that stdin payload — agy already reports
+# per-model quota in the "quota" field, so this script does no background
+# polling of the local language server (no port scanning / CSRF tokens /
+# HTTP probing).
 # ==============================================================================
 
-# Configuration
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CACHE_FILE="${SCRIPT_DIR}/quota_cache.json"
-REFRESH_SCRIPT="${SCRIPT_DIR}/quota_refresh.sh"
-CACHE_MAX_AGE_SECONDS=60
 BAR_WIDTH=16
 
 # ANSI Escape Codes
@@ -24,151 +25,131 @@ CYAN="${ESC}[36m"
 GRAY="${ESC}[90m"
 WHITE="${ESC}[37m"
 
-# Helper: Color by remaining percentage
+# Helper: Color by remaining percentage (green = healthy, red = low)
 get_quota_color() {
-    local pct=$1
-    # Strip decimals for integer comparison
-    local pct_int=${pct%.*}
+    local pct_int=${1%.*}
     if [ -z "$pct_int" ]; then pct_int=0; fi
-
-    if [ "$pct_int" -ge 70 ]; then
-        echo "$GREEN"
-    elif [ "$pct_int" -ge 30 ]; then
-        echo "$YELLOW"
-    else
-        echo "$RED"
+    if [ "$pct_int" -ge 70 ]; then echo "$GREEN"
+    elif [ "$pct_int" -ge 30 ]; then echo "$YELLOW"
+    else echo "$RED"
     fi
 }
 
 # Helper: Render a single progress bar
 format_progress_bar() {
-    local label="$1"
-    local pct="$2"
-    local refresh_info="$3"
-    local icon="◆"
+    local label="$1" pct="$2" refresh_info="$3" icon="${4:-◆}"
+    local color pct_int filled_count empty_count filled_str empty_str pct_str padded_label
 
-    local color
     color=$(get_quota_color "$pct")
-
-    # Strip decimals for arithmetic
-    local pct_int=${pct%.*}
+    pct_int=${pct%.*}
     if [ -z "$pct_int" ]; then pct_int=0; fi
 
-    local filled_count=$(( (pct_int * BAR_WIDTH) / 100 ))
+    filled_count=$(( (pct_int * BAR_WIDTH) / 100 ))
     if [ $filled_count -lt 0 ]; then filled_count=0; fi
     if [ $filled_count -gt $BAR_WIDTH ]; then filled_count=$BAR_WIDTH; fi
-    local empty_count=$(( BAR_WIDTH - filled_count ))
+    empty_count=$(( BAR_WIDTH - filled_count ))
 
-    local filled_str=""
-    if [ $filled_count -gt 0 ]; then
-        filled_str=$(printf '█%.0s' $(seq 1 "$filled_count"))
-    fi
+    filled_str=""
+    if [ $filled_count -gt 0 ]; then filled_str=$(printf '█%.0s' $(seq 1 "$filled_count")); fi
+    empty_str=""
+    if [ $empty_count -gt 0 ]; then empty_str=$(printf '░%.0s' $(seq 1 "$empty_count")); fi
 
-    local empty_str=""
-    if [ $empty_count -gt 0 ]; then
-        empty_str=$(printf '░%.0s' $(seq 1 "$empty_count"))
-    fi
-
-    # Format percentage with consistent width (invariant culture dot decimal)
-    local pct_str
     pct_str=$(printf "%5.1f%%" "$pct")
-
-    # Pad label to consistent width
-    local padded_label
     padded_label=$(printf "%-16s" "$label")
 
     echo "${DIM}${color}${icon}${RESET} ${WHITE}${padded_label}${RESET} ${GRAY}[${RESET}${color}${filled_str}${GRAY}${empty_str}${RESET}${GRAY}]${RESET} ${BOLD}${color}${pct_str}${RESET}  ${DIM}${CYAN}${refresh_info}${RESET}"
 }
 
-# Helper: Trigger background refresh if cache is stale
-start_quota_refresh_if_needed() {
-    local needs_refresh=false
+# --- Read stdin (agy pipes JSON session state) ---
+payload=$(cat)
 
-    if [ ! -f "$CACHE_FILE" ]; then
-        needs_refresh=true
-    else
-        local mtime
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            mtime=$(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
-        else
-            mtime=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
-        fi
-        
-        local now
-        now=$(date +%s)
-        local cache_age=$((now - mtime))
+if [ -z "$payload" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo "${DIM}${GRAY}○ No quota data in payload yet (run /usage to check manually)${RESET}"
+    exit 0
+fi
 
-        if [ "$cache_age" -gt "$CACHE_MAX_AGE_SECONDS" ]; then
-            needs_refresh=true
-        fi
-    fi
+# --- Parse payload: branch, quota buckets (grouped Gemini / Claude+GPT), context window ---
+# Prints pipe-delimited lines this script then renders as bars:
+#   BRANCH|<name>|<dirty 0/1>          (only if vcs.branch present)
+#   QUOTA|Gemini|<pct>|<reset_info>
+#   QUOTA|Claude/GPT|<pct>|<reset_info>
+#   CONTEXT|<remaining_pct>|<used_pct>  (only if context_window present)
+parsed=$(python3 -c '
+import sys, json, re
 
-    if [ "$needs_refresh" = true ] && [ -f "$REFRESH_SCRIPT" ]; then
-        # Launch refresh in background — redirect stdin, stdout, stderr so it doesn't block the TUI
-        bash "$REFRESH_SCRIPT" >/dev/null 2>&1 &
-    fi
-}
+def format_reset_in(seconds):
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return "N/A"
+    if seconds <= 0:
+        return "now"
+    hours, mins = divmod(seconds // 60, 60)
+    return f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
 
-# --- Main: Read cache and render ---
-start_quota_refresh_if_needed
-
-# Read cached quota data
-if [ -f "$CACHE_FILE" ]; then
-    # Parse cache fields using python3 if available (robust) or fallback to grep/sed
-    if command -v python3 >/dev/null 2>&1; then
-        parsed_data=$(python3 -c '
-import sys, json
 try:
-    with open(sys.argv[1], "r", encoding="utf-8") as f:
-        d = json.load(f)
-    if d.get("error"):
-        print("ERROR")
-    else:
-        stale = " (stale)" if d.get("stale") else ""
-        print(f"OK|{d[\"gemini\"][\"remaining_pct\"]}|{d[\"gemini\"][\"refresh_in\"]}|{d[\"claude_gpt\"][\"remaining_pct\"]}|{d[\"claude_gpt\"][\"refresh_in\"]}|{stale}")
+    data = json.loads(sys.argv[1])
 except Exception:
-    print("ERROR")
-' "$CACHE_FILE" 2>/dev/null)
-    else
-        # Fallback to grep/sed if no Python
-        # (Checks for any error block, parses raw fields)
-        if grep -q '"error": *[^n]' "$CACHE_FILE"; then
-            parsed_data="ERROR"
-        else
-            gem_pct=$(grep -o '"gemini": *{[^}]*}' "$CACHE_FILE" | grep -o '"remaining_pct": *[0-9.]*' | awk '{print $2}')
-            gem_ref=$(grep -o '"gemini": *{[^}]*}' "$CACHE_FILE" | grep -o '"refresh_in": *"[^"]*"' | cut -d'"' -f4)
-            cla_pct=$(grep -o '"claude_gpt": *{[^}]*}' "$CACHE_FILE" | grep -o '"remaining_pct": *[0-9.]*' | awk '{print $2}')
-            cla_ref=$(grep -o '"claude_gpt": *{[^}]*}' "$CACHE_FILE" | grep -o '"refresh_in": *"[^"]*"' | cut -d'"' -f4)
-            stale_flag=$(grep -o '"stale": *[a-z]*' "$CACHE_FILE" | awk '{print $2}')
-            stale_str=""
-            if [ "$stale_flag" = "true" ]; then stale_str=" (stale)"; fi
-            
-            if [ -n "$gem_pct" ] && [ -n "$cla_pct" ]; then
-                parsed_data="OK|${gem_pct}|${gem_ref}|${cla_pct}|${cla_ref}|${stale_str}"
-            else
-                parsed_data="ERROR"
-            fi
-        fi
-    fi
-else
-    parsed_data="ERROR"
+    sys.exit(0)
+
+quota = data.get("quota") or {}
+if not quota:
+    sys.exit(0)
+
+vcs = data.get("vcs") or {}
+branch = vcs.get("branch")
+if branch:
+    dirty = 1 if vcs.get("dirty") else 0
+    print(f"BRANCH|{branch}|{dirty}")
+
+buckets = {"gemini": None, "claude_gpt": None}
+for key, entry in quota.items():
+    if re.search(r"gemini", key, re.IGNORECASE):
+        group = "gemini"
+    elif re.search(r"claude|gpt", key, re.IGNORECASE):
+        group = "claude_gpt"
+    else:
+        continue
+    frac = float(entry.get("remaining_fraction") or 0.0)
+    pct = round(max(0.0, min(1.0, frac)) * 100.0, 2)
+    reset = format_reset_in(entry.get("reset_in_seconds"))
+    cur = buckets[group]
+    if cur is None or pct < cur[0]:
+        buckets[group] = (pct, reset)
+
+for group, label in (("gemini", "Gemini"), ("claude_gpt", "Claude/GPT")):
+    pct, reset = buckets[group] if buckets[group] else (0.0, "N/A")
+    info = "Full" if pct >= 99.9 else f"Resets in {reset}"
+    print(f"QUOTA|{label}|{pct}|{info}")
+
+cw = data.get("context_window") or {}
+if cw.get("remaining_percentage") is not None:
+    remaining = float(cw["remaining_percentage"])
+    used = round(100.0 - remaining, 1)
+    print(f"CONTEXT|{remaining}|{used}% used")
+' "$payload" 2>/dev/null)
+
+if [ -z "$parsed" ]; then
+    echo "${DIM}${GRAY}○ No quota data in payload yet (run /usage to check manually)${RESET}"
+    exit 0
 fi
 
-if [[ "$parsed_data" == "OK|"* ]]; then
-    IFS='|' read -r -a fields <<< "$parsed_data"
-    gem_pct="${fields[1]}"
-    gem_ref="${fields[2]}"
-    cla_pct="${fields[3]}"
-    cla_ref="${fields[4]}"
-    stale_str="${fields[5]}"
+# Strip stray CRs (e.g. a python interpreter on PATH that emits CRLF) so field
+# comparisons below don't silently fail.
+parsed="${parsed//$'\r'/}"
 
-    # Process refresh times
-    if [ "$gem_ref" = "Full" ] || [ -z "$gem_ref" ]; then gem_info="Full"; else gem_info="Resets in ${gem_ref}"; fi
-    if [ "$cla_ref" = "Full" ] || [ -z "$cla_ref" ]; then cla_info="Full"; else cla_info="Resets in ${cla_ref}"; fi
-
-    format_progress_bar "Gemini" "$gem_pct" "$gem_info" | sed "s/$/${stale_str}/"
-    format_progress_bar "Claude/GPT" "$cla_pct" "$cla_info" | sed "s/$/${stale_str}/"
-else
-    # No data or error — show loading state
-    echo "${DIM}${GRAY}○ Quota data loading... (run /usage to check manually)${RESET}"
-fi
+while IFS='|' read -r kind a b c; do
+    case "$kind" in
+        BRANCH)
+            dirty_mark=""
+            if [ "$b" = "1" ]; then dirty_mark=" ${YELLOW}*${RESET}"; fi
+            echo "${DIM}${GRAY}on${RESET} ${CYAN}${a}${RESET}${dirty_mark}"
+            ;;
+        QUOTA)
+            format_progress_bar "$a" "$b" "$c"
+            ;;
+        CONTEXT)
+            format_progress_bar "Context" "$a" "$b" "■"
+            ;;
+    esac
+done <<< "$parsed"

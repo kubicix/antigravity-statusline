@@ -20,8 +20,10 @@
 </p>
 
 ```
+on main *
 ◆ Gemini       [████████████████]  100.0%  Full
 ◆ Claude/GPT   [░░░░░░░░░░░░░░░░]    0.0%  Resets in 16m
+■ Context      [██████████░░░░░░]   62.0%  38.0% used
 ```
 
 Bars are colored by remaining quota:
@@ -36,48 +38,38 @@ Bars are colored by remaining quota:
 
 ## What it shows
 
-Two quota groups — the same grouping as the `/usage` panel — each on its own line:
-
-- **Gemini** — Gemini Pro + Gemini Flash (they share one quota pool)
-- **Claude/GPT** — Claude Opus / Sonnet + GPT-OSS (they share one quota pool)
-
-Each line shows the **remaining quota percentage**, a progress bar, and the **reset time**
-(`Resets in 16m`, or `Full` when at 100 %). When a group has several models, the line
-reflects the **most-constrained** one (lowest remaining).
+- **Branch** — current git branch, with a `*` if the working tree is dirty
+- **Gemini** / **Claude/GPT** — the same two quota groups the `/usage` panel shows,
+  each on its own line. Each line shows the **remaining quota percentage**, a progress
+  bar, and the **reset time** (`Resets in 16m`, or `Full` at 100 %). When a group has
+  several models, the line reflects the **most-constrained** one (lowest remaining).
+- **Context** — remaining context-window capacity for the current conversation
 
 ---
 
 ## How it works
 
-While a session is open, `agy` runs an embedded language server (inside `agy.exe`)
-that exposes a Connect-RPC endpoint on a random local port. The statusline reads quota
-from it in two pieces:
+`agy` pipes a JSON payload to the statusline command on **every agent state change** —
+that payload already includes a `quota` object (per-model `remaining_fraction` /
+`reset_in_seconds`), the current git branch, and context-window usage. `statusline.ps1`
+/ `statusline.sh` just read that stdin payload and render it:
 
-1. **`quota_refresh.ps1`** (background fetcher)
-   - Finds the `agy.exe` process (or a standalone `language_server` when the Antigravity
-     IDE is running) and its listening ports.
-   - Calls `POST /exa.language_server_pb.LanguageServerService/GetUserStatus` with
-     `Connect-Protocol-Version: 1`. The embedded server accepts local requests without a
-     CSRF token; a discovered `--csrf_token` is sent as `X-Codeium-Csrf-Token` when present.
-   - Parses each model's `remainingFraction` + `resetTime`, groups them into the two
-     pools (Gemini, Claude/GPT), and writes `quota_cache.json`.
+- Quota buckets are grouped into Gemini / Claude+GPT by matching the bucket key name,
+  keeping the most-constrained bucket per group.
+- Branch name + dirty flag come straight from the payload's `vcs` field.
+- The context bar comes from `context_window.remaining_percentage`.
 
-2. **`statusline.ps1`** (renderer)
-   - Called by `agy` on every state change (session JSON piped on stdin).
-   - Reads `quota_cache.json` and draws the bars.
-   - If the cache is older than 60 seconds, it launches `quota_refresh.ps1` in the
-     background (hidden window) — so rendering never blocks the TUI.
-
-Ports and the CSRF token change every time `agy` restarts, so discovery is fully dynamic.
+No background process, no cache file, no talking to the local language server — the
+data agy already sends is used directly, so there's nothing to discover, poll, or go
+stale.
 
 ---
 
 ## Requirements
 
 - **Windows:** PowerShell 5.1 (built-in)
-- **macOS / Linux:** Bash 4.0+ & `lsof`
+- **macOS / Linux:** Bash 4.0+ & `python3` (used to parse the JSON payload)
 - Antigravity CLI (`agy`) installed and signed in — verify with `agy --version`
-- An active `agy` session running (the language server must be up to serve quota)
 
 ---
 
@@ -124,9 +116,8 @@ chmod +x install.sh
 ### What the installer does
 
 1. Backs up your existing `settings.json` → `settings.json.bak`
-2. Copies the renderer and background scripts to `~/.gemini/antigravity-cli/`
+2. Copies the renderer script to `~/.gemini/antigravity-cli/`
 3. Sets `statusLine` in `settings.json` to run the renderer script
-4. Writes an initial cache so the first frame shows a loading state
 
 Then open a new session:
 
@@ -134,7 +125,7 @@ Then open a new session:
 agy
 ```
 
-The bars appear below the input box and refresh automatically every 60 seconds.
+The bars appear below the input box and update on every agent state change.
 
 ---
 
@@ -168,9 +159,7 @@ Tunable values at the top of the scripts:
 
 | Script | Variable | Default | Meaning |
 | --- | --- | --- | --- |
-| `statusline.ps1` / `.sh` | `CACHE_MAX_AGE_SECONDS` | `60` | How old the cache may get before a background refresh fires |
 | `statusline.ps1` / `.sh` | `BAR_WIDTH` | `16` | Progress bar width in characters |
-| `quota_refresh.ps1` / `.sh` | `TIMEOUT_SECONDS` | `5` | Per-request HTTP timeout |
 
 Color thresholds live in `Get-QuotaColor` / `get_quota_color` inside the renderer scripts.
 
@@ -189,18 +178,15 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
 This restores `settings.json` from the backup (or clears the `statusLine` entry if no
-backup exists) and removes the installed scripts and cache. Restart `agy` to apply.
+backup exists) and removes the installed script. Restart `agy` to apply.
 
 ---
 
 ## Limitations
 
 - **Cross-platform.** Works natively on Windows (PowerShell) and macOS/Linux (Bash).
-- **No weekly vs. 5-hour split.** The `/usage` panel shows separate *weekly* and
-  *5-hour* limits per group. The local `GetUserStatus` API does **not** expose that
-  breakdown — it returns a single effective `remainingFraction` + `resetTime` per model.
-  This statusline shows that effective value. Weekly/5-hour numbers are only available
-  inside the interactive `/usage` panel.
+- Whatever `quota` bucket names/values `agy` sends is what's shown — if a bucket name
+  doesn't match `gemini` or `claude|gpt`, it's ignored (open an issue if you hit that).
 - Models in the same backend pool share quota, so e.g. Claude and GPT-OSS may move
   together.
 - Numbers use the system locale decimal separator (so `100.0%` or `100,0%` depending on system locale).
@@ -209,15 +195,11 @@ backup exists) and removes the installed scripts and cache. Restart `agy` to app
 
 ## Troubleshooting
 
-**Bars stuck at 0 % / "loading":**
+**Bars show "No quota data in payload yet":**
 
-- Make sure an `agy` session is actually running (the language server must be alive).
-- Run the fetcher manually to see the error:
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File quota_refresh.ps1
-  Get-Content quota_cache.json
-  ```
-  Check the `error` field. `null` means success.
+- Make sure you're on an `agy` version whose statusline payload includes the `quota`
+  field (see [Antigravity's statusline docs](https://antigravity.google/docs/cli/statusline/)).
+- Run `/usage` manually to confirm your session actually has quota data.
 
 **No status line at all:**
 
@@ -230,12 +212,10 @@ backup exists) and removes the installed scripts and cache. Restart `agy` to app
 
 | File | Purpose |
 | --- | --- |
-| `statusline.ps1` | Renders the quota bars (called by `agy`) |
-| `quota_refresh.ps1` | Background fetcher — queries the API, writes the cache |
-| `quota_cache.json` | Latest quota snapshot |
-| `install.ps1` | Local installer |
-| `install-remote.ps1` | Remote one-liner installer (`irm \| iex`) |
-| `uninstall.ps1` | Uninstaller |
+| `statusline.ps1` / `.sh` | Renders the quota, branch and context bars (called by `agy` on every state change) |
+| `install.ps1` / `.sh` | Local installer |
+| `install-remote.ps1` / `.sh` | Remote one-liner installer (`irm \| iex`) |
+| `uninstall.ps1` / `.sh` | Uninstaller |
 
 ---
 
